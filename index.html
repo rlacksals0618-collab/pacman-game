@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>한밤의 팩맨</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Gowun+Dodum&display=swap">
+<style>
+  /* Layout: arcade cabinet — one centered playfield, score marquee above, controls hint below */
+  :root {
+    color-scheme: dark;
+    --cabinet: #07071a;
+    --screen: #000008;
+    --maze: #2a3bff;
+    --maze-fill: #0a0f3d;
+    --pac: #ffd31a;
+    --dot: #ffc9a8;
+    --ink: #e8e6ff;
+    --muted: #8b89b8;
+    --door: #ff9ecf;
+    --f-display: "Press Start 2P", "Courier New", monospace;
+    --f-body: "Gowun Dodum", "Malgun Gothic", system-ui, sans-serif;
+  }
+  html, body { height: 100%; }
+  body {
+    background: var(--cabinet); color: var(--ink); font-family: var(--f-body);
+    display: flex; flex-direction: column; align-items: center;
+    padding-block: 20px 28px; padding-inline: 16px; box-sizing: border-box; gap: 14px;
+  }
+  h1 {
+    font-family: var(--f-display); color: var(--pac); font-size: clamp(1rem, 4vw, 1.5rem);
+    margin: 0; letter-spacing: .08em; text-shadow: 0 0 12px rgba(255, 211, 26, .45);
+  }
+  .marquee {
+    width: min(100%, 560px); display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
+    font-family: var(--f-display); font-size: clamp(.55rem, 2vw, .75rem); text-transform: uppercase;
+  }
+  .marquee > div { display: flex; flex-direction: column; gap: 6px; }
+  .marquee > div:nth-child(2) { align-items: center; }
+  .marquee > div:nth-child(3) { align-items: flex-end; }
+  .marquee .label { color: var(--muted); letter-spacing: .12em; }
+  .marquee .val { color: var(--ink); font-variant-numeric: tabular-nums; }
+  .stage { position: relative; width: min(100%, 560px); aspect-ratio: 560 / 620; }
+  canvas { display: block; width: 100%; height: 100%; background: var(--screen); border-radius: 6px; box-shadow: 0 0 0 2px #15154a, 0 0 40px rgba(42, 59, 255, .25); touch-action: none; }
+  .foot {
+    width: min(100%, 560px); display: flex; justify-content: space-between; align-items: center;
+    flex-wrap: wrap; gap: 10px; font-size: .95rem; color: var(--muted);
+  }
+  .lives { display: flex; gap: 6px; min-height: 18px; }
+  kbd {
+    font-family: var(--f-display); font-size: .6rem; color: var(--ink); background: #15154a;
+    border: 1px solid #2c2c7a; border-bottom-width: 3px; border-radius: 4px; padding: 3px 6px;
+  }
+  .pad { display: none; grid-template-columns: repeat(3, 64px); grid-template-rows: repeat(2, 56px); gap: 8px; }
+  .pad button {
+    font-size: 1.4rem; color: var(--ink); background: #15154a; border: 1px solid #2c2c7a;
+    border-radius: 10px; cursor: pointer; -webkit-tap-highlight-color: transparent;
+  }
+  .pad button:active { background: #2a3bff; }
+  .pad button:focus-visible, kbd:focus-visible { outline: 2px solid var(--pac); outline-offset: 2px; }
+  .pad [data-d="up"] { grid-column: 2; }
+  .pad [data-d="left"] { grid-column: 1; grid-row: 2; }
+  .pad [data-d="down"] { grid-column: 2; grid-row: 2; }
+  .pad [data-d="right"] { grid-column: 3; grid-row: 2; }
+  @media (pointer: coarse) { .pad { display: grid; } }
+</style>
+<style>body{margin:0}</style>
+</head>
+<body>
+
+<h1>PAC-MAN</h1>
+<div class="marquee">
+  <div><span class="label">1UP</span><span class="val" id="score">0</span></div>
+  <div><span class="label">High Score</span><span class="val" id="high">0</span></div>
+  <div><span class="label">Level</span><span class="val" id="level">1</span></div>
+</div>
+<div class="stage"><canvas id="c" aria-label="팩맨 게임 화면"></canvas></div>
+<div class="foot">
+  <div class="lives" id="lives" aria-label="남은 목숨"></div>
+  <div><kbd>←</kbd> <kbd>↑</kbd> <kbd>↓</kbd> <kbd>→</kbd> 이동 · <kbd>P</kbd> 일시정지</div>
+</div>
+<div class="pad" aria-label="방향 버튼">
+  <button data-d="up" aria-label="위">▲</button>
+  <button data-d="left" aria-label="왼쪽">◀</button>
+  <button data-d="down" aria-label="아래">▼</button>
+  <button data-d="right" aria-label="오른쪽">▶</button>
+</div>
+
+<script>
+// ---------- 미로 (28 x 31) : # 벽, . 쿠키, o 파워쿠키, - 유령집 문 ----------
+const MAP_SRC = [
+  "############################",
+  "#............##............#",
+  "#.####.#####.##.#####.####.#",
+  "#o####.#####.##.#####.####o#",
+  "#.####.#####.##.#####.####.#",
+  "#..........................#",
+  "#.####.##.########.##.####.#",
+  "#.####.##.########.##.####.#",
+  "#......##....##....##......#",
+  "######.##### ## #####.######",
+  "     #.##### ## #####.#     ",
+  "     #.##          ##.#     ",
+  "     #.## ###--### ##.#     ",
+  "######.## #      # ##.######",
+  "      .   #      #   .      ",
+  "######.## #      # ##.######",
+  "     #.## ######## ##.#     ",
+  "     #.##          ##.#     ",
+  "     #.## ######## ##.#     ",
+  "######.## ######## ##.######",
+  "#............##............#",
+  "#.####.#####.##.#####.####.#",
+  "#.####.#####.##.#####.####.#",
+  "#o..##.......  .......##..o#",
+  "###.##.##.########.##.##.###",
+  "###.##.##.########.##.##.###",
+  "#......##....##....##......#",
+  "#.##########.##.##########.#",
+  "#.##########.##.##########.#",
+  "#..........................#",
+  "############################",
+];
+const COLS = 28, ROWS = 31, TS = 20, W = COLS * TS, H = ROWS * TS;
+const DV = { left: [-1, 0], right: [1, 0], up: [0, -1], down: [0, 1] };
+const OPP = { left: "right", right: "left", up: "down", down: "up" };
+const ORDER = ["up", "left", "down", "right"];
+const FRIGHT_POINTS = [200, 400, 800, 1600];
+const MODES = [["scatter", 7], ["chase", 20], ["scatter", 7], ["chase", 20], ["scatter", 5], ["chase", Infinity]];
+
+const css = getComputedStyle(document.documentElement);
+const C = name => css.getPropertyValue(name).trim();
+const COL = { maze: C("--maze"), fill: C("--maze-fill"), pac: C("--pac"), dot: C("--dot"), door: C("--door"), screen: C("--screen") };
+
+// ---------- 캔버스 ----------
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+const dpr = Math.min(window.devicePixelRatio || 1, 2);
+canvas.width = W * dpr; canvas.height = H * dpr;
+ctx.scale(dpr, dpr);
+
+const scoreEl = document.getElementById("score");
+const highEl = document.getElementById("high");
+const levelEl = document.getElementById("level");
+const livesEl = document.getElementById("lives");
+
+// ---------- 상태 ----------
+let map, dotsLeft, pac, ghosts, queued;
+let score = 0, lives = 3, level = 1, high = 0;
+let state = "title";         // title, ready, playing, dying, clear, over, paused
+let stateT = 0, elapsed = 0, modeIdx = 0, modeT = 0, frightT = 0, combo = 0, freezeT = 0, clock = 0;
+let popups = [];
+try { high = +localStorage.getItem("pacHigh") || 0; } catch (e) {}
+
+const wrap = x => (x + COLS) % COLS;
+const cell = (x, y) => (y < 0 || y >= ROWS) ? "#" : map[y][wrap(x)];
+const isWall = (x, y) => cell(x, y) === "#";
+const isDoor = (x, y) => cell(x, y) === "-";
+function canGo(x, y, d) {
+  const [dx, dy] = DV[d];
+  return !isWall(x + dx, y + dy) && !isDoor(x + dx, y + dy);
+}
+function pos(e) {
+  if (!e.dir) return { x: e.x, y: e.y };
+  const [dx, dy] = DV[e.dir];
+  return { x: e.x + dx * e.p, y: e.y + dy * e.p };
+}
+function step(e) {
+  const [dx, dy] = DV[e.dir];
+  e.x = wrap(e.x + dx); e.y += dy;
+}
+function reverse(e) {
+  if (!e.dir || e.p <= 0) return;
+  step(e); e.p = 1 - e.p; e.dir = OPP[e.dir];
+}
+const lvl = () => Math.min(1 + (level - 1) * 0.05, 1.25);
+
+function resetMap() {
+  map = MAP_SRC.map(r => r.padEnd(COLS, " ").split(""));
+  dotsLeft = map.flat().filter(c => c === "." || c === "o").length;
+}
+
+function resetActors() {
+  pac = { x: 13, y: 23, dir: "left", face: "left", p: 0, moving: false };
+  queued = null;
+  ghosts = [
+    { name: "blinky", color: "#ff2b2b", x: 13, y: 11, dir: "left", p: 0, state: "active", release: 0, corner: [25, -3] },
+    { name: "pinky",  color: "#ffb0e0", x: 13, y: 14, dir: null, p: 0, state: "house", release: 1, corner: [2, -3] },
+    { name: "inky",   color: "#29e6ff", x: 11, y: 14, dir: null, p: 0, state: "house", release: 5, corner: [27, 31] },
+    { name: "clyde",  color: "#ffa53a", x: 15, y: 14, dir: null, p: 0, state: "house", release: 9, corner: [0, 31] },
+  ];
+  ghosts.forEach(g => g.fright = false);
+  elapsed = 0; modeIdx = 0; modeT = 0; frightT = 0; freezeT = 0; popups = [];
+}
+
+function newGame() {
+  score = 0; lives = 3; level = 1;
+  resetMap(); resetActors();
+  setState("ready");
+  updateHud();
+}
+
+function setState(s) { state = s; stateT = 0; }
+
+function updateHud() {
+  scoreEl.textContent = score;
+  if (score > high) {
+    high = score;
+    try { localStorage.setItem("pacHigh", high); } catch (e) {}
+  }
+  highEl.textContent = high;
+  levelEl.textContent = level;
+  livesEl.innerHTML = "";
+  for (let i = 0; i < lives - 1; i++) {
+    const c = document.createElement("canvas");
+    c.width = 36; c.height = 36; c.style.width = c.style.height = "18px";
+    const g = c.getContext("2d");
+    g.fillStyle = COL.pac; g.beginPath(); g.moveTo(18, 18);
+    g.arc(18, 18, 16, Math.PI * 1.2, Math.PI * 0.8); g.closePath(); g.fill();
+    livesEl.appendChild(c);
+  }
+}
+
+// ---------- 팩맨 ----------
+function eatAt(x, y) {
+  const c = map[y][x];
+  if (c === ".") { score += 10; map[y][x] = " "; dotsLeft--; }
+  else if (c === "o") {
+    score += 50; map[y][x] = " "; dotsLeft--;
+    frightT = Math.max(6 - (level - 1) * 0.5, 2);
+    combo = 0;
+    ghosts.forEach(g => {
+      if (g.state === "eaten") return;
+      if (g.state === "active" && !g.fright) reverse(g);
+      g.fright = true;
+    });
+  } else return;
+  updateHud();
+  if (dotsLeft === 0) setState("clear");
+}
+
+function updatePac(dt) {
+  if (pac.moving && queued === OPP[pac.dir]) { reverse(pac); pac.face = pac.dir; }
+  if (!pac.moving) {
+    if (queued && canGo(pac.x, pac.y, queued)) pac.dir = queued;
+    if (!canGo(pac.x, pac.y, pac.dir)) return;
+    pac.moving = true;
+  }
+  pac.face = pac.dir;
+  pac.p += 7.5 * lvl() * dt;
+  while (pac.p >= 1) {
+    pac.p -= 1;
+    step(pac);
+    eatAt(pac.x, pac.y);
+    if (state !== "playing") return;
+    if (queued && canGo(pac.x, pac.y, queued)) pac.dir = queued;
+    else if (!canGo(pac.x, pac.y, pac.dir)) { pac.moving = false; pac.p = 0; break; }
+  }
+}
+
+// ---------- 유령 ----------
+function target(g) {
+  const mode = MODES[modeIdx][0];
+  if (mode === "scatter" && g.name !== "blinky") return g.corner;
+  if (mode === "scatter") return g.corner;
+  const [dx, dy] = DV[pac.face];
+  if (g.name === "blinky") return [pac.x, pac.y];
+  if (g.name === "pinky") return [pac.x + dx * 4, pac.y + dy * 4];
+  if (g.name === "inky") {
+    const b = ghosts[0];
+    return [2 * (pac.x + dx * 2) - b.x, 2 * (pac.y + dy * 2) - b.y];
+  }
+  const dist = Math.hypot(pac.x - g.x, pac.y - g.y);
+  return dist > 8 ? [pac.x, pac.y] : g.corner;
+}
+
+function greedy(g, tx, ty, random) {
+  let opts = ORDER.filter(d => d !== OPP[g.dir] && canGo(g.x, g.y, d));
+  if (!opts.length) opts = ORDER.filter(d => canGo(g.x, g.y, d));
+  if (random) return opts[Math.floor(Math.random() * opts.length)];
+  let best = opts[0], bestD = Infinity;
+  for (const d of opts) {
+    const [dx, dy] = DV[d];
+    const dist = (g.x + dx - tx) ** 2 + (g.y + dy - ty) ** 2;
+    if (dist < bestD) { bestD = dist; best = d; }
+  }
+  return best;
+}
+
+function choose(g) {
+  switch (g.state) {
+    case "leaving":
+      if (g.x < 13) return "right";
+      if (g.x > 13) return "left";
+      if (g.y > 11) return "up";
+      g.state = "active";
+      return "left";
+    case "entering":
+      if (g.y < 14) return "down";
+      g.state = "leaving"; g.fright = false;
+      return choose(g);
+    case "eaten":
+      if (g.x === 13 && g.y === 11) { g.state = "entering"; return "down"; }
+      return greedy(g, 13, 11, false);
+    default: {
+      const [tx, ty] = target(g);
+      return greedy(g, tx, ty, g.fright);
+    }
+  }
+}
+
+function ghostSpeed(g) {
+  if (g.state === "eaten") return 15;
+  if (g.state !== "active") return 4;
+  if (g.y === 14 && (g.x < 6 || g.x > 21)) return 3.6;
+  if (g.fright) return 4.5;
+  return 7.1 * lvl();
+}
+
+function updateGhost(g, dt) {
+  if (g.state === "house") {
+    if (elapsed < g.release) return;
+    g.state = "leaving";
+  }
+  if (!g.dir) g.dir = choose(g);
+  g.p += ghostSpeed(g) * dt;
+  while (g.p >= 1) {
+    g.p -= 1;
+    step(g);
+    g.dir = choose(g);
+  }
+}
+
+function checkCollisions() {
+  const pp = pos(pac);
+  for (const g of ghosts) {
+    if (g.state !== "active") continue;
+    const gp = pos(g);
+    let dx = Math.abs(pp.x - gp.x); dx = Math.min(dx, COLS - dx);
+    if (dx + Math.abs(pp.y - gp.y) > 0.7) continue;
+    if (g.fright) {
+      const pts = FRIGHT_POINTS[Math.min(combo, 3)];
+      combo++;
+      score += pts;
+      popups.push({ x: gp.x, y: gp.y, text: pts, t: 1 });
+      g.fright = false; g.state = "eaten";
+      freezeT = 0.5;
+      updateHud();
+    } else {
+      setState("dying");
+      return;
+    }
+  }
+}
+
+// ---------- 메인 루프 ----------
+function update(dt) {
+  clock += dt;
+  stateT += dt;
+  popups.forEach(p => p.t -= dt);
+  popups = popups.filter(p => p.t > 0);
+
+  if (state === "ready" && stateT > 1.8) { setState("playing"); pac.moving = true; }
+  else if (state === "dying" && stateT > 1.8) {
+    lives--; updateHud();
+    if (lives <= 0) setState("over");
+    else { resetActors(); setState("ready"); }
+  }
+  else if (state === "clear" && stateT > 2.2) {
+    level++; resetMap(); resetActors(); setState("ready"); updateHud();
+  }
+  if (state !== "playing") return;
+
+  if (freezeT > 0) { freezeT -= dt; return; }
+  elapsed += dt;
+
+  if (frightT > 0) {
+    frightT -= dt;
+    if (frightT <= 0) ghosts.forEach(g => g.fright = false);
+  } else {
+    modeT += dt;
+    if (modeT >= MODES[modeIdx][1]) {
+      modeT = 0; modeIdx = Math.min(modeIdx + 1, MODES.length - 1);
+      ghosts.forEach(g => { if (g.state === "active") reverse(g); });
+    }
+  }
+
+  updatePac(dt);
+  if (state !== "playing") return;
+  checkCollisions();
+  if (state !== "playing") return;
+  ghosts.forEach(g => updateGhost(g, dt));
+  checkCollisions();
+}
+
+// ---------- 그리기 ----------
+const mazeLayer = document.createElement("canvas");
+function buildMazeLayer(flashColor) {
+  mazeLayer.width = W * dpr; mazeLayer.height = H * dpr;
+  const m = mazeLayer.getContext("2d");
+  m.scale(dpr, dpr);
+  m.strokeStyle = flashColor || COL.maze;
+  m.lineWidth = 2;
+  m.lineCap = "square";
+  const wall = (x, y) => x >= 0 && x < COLS && y >= 0 && y < ROWS && MAP_SRC[y][x] === "#";
+  for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) {
+    if (!wall(x, y)) continue;
+    const px = x * TS, py = y * TS;
+    m.fillStyle = COL.fill;
+    m.fillRect(px, py, TS, TS);
+    m.beginPath();
+    if (!wall(x, y - 1)) { m.moveTo(px, py + 1); m.lineTo(px + TS, py + 1); }
+    if (!wall(x, y + 1)) { m.moveTo(px, py + TS - 1); m.lineTo(px + TS, py + TS - 1); }
+    if (!wall(x - 1, y)) { m.moveTo(px + 1, py); m.lineTo(px + 1, py + TS); }
+    if (!wall(x + 1, y)) { m.moveTo(px + TS - 1, py); m.lineTo(px + TS - 1, py + TS); }
+    m.stroke();
+  }
+  m.fillStyle = COL.door;
+  m.fillRect(13 * TS, 12 * TS + TS / 2 - 2, TS * 2, 4);
+}
+const flashLayer = document.createElement("canvas");
+
+function drawDots() {
+  for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) {
+    const c = map[y][x];
+    if (c === ".") {
+      ctx.fillStyle = COL.dot;
+      ctx.fillRect(x * TS + TS / 2 - 2, y * TS + TS / 2 - 2, 4, 4);
+    } else if (c === "o" && (state !== "playing" || Math.floor(clock * 4) % 2 === 0)) {
+      ctx.fillStyle = COL.dot;
+      ctx.beginPath(); ctx.arc(x * TS + TS / 2, y * TS + TS / 2, 7, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+}
+
+function drawPac() {
+  const { x, y } = pos(pac);
+  const cx = (x + 0.5) * TS, cy = (y + 0.5) * TS, r = TS * 0.75;
+  const rot = { right: 0, down: Math.PI / 2, left: Math.PI, up: -Math.PI / 2 }[pac.face];
+  let mouth;
+  if (state === "dying") {
+    const k = Math.min(stateT / 1.4, 1);
+    mouth = 0.2 + k * (Math.PI - 0.2);
+    if (k >= 1) return;
+  } else if (state === "title" || state === "ready") mouth = 0.6;
+  else mouth = pac.moving ? 0.05 + Math.abs(Math.sin(clock * 14)) * 0.75 : 0.5;
+  ctx.save();
+  ctx.translate(cx, cy); ctx.rotate(state === "dying" ? -Math.PI / 2 : rot);
+  ctx.fillStyle = COL.pac;
+  ctx.beginPath(); ctx.moveTo(0, 0);
+  ctx.arc(0, 0, r, mouth / 2, Math.PI * 2 - mouth / 2);
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+
+function drawGhost(g) {
+  const { x, y } = pos(g);
+  const bob = g.state === "house" ? Math.sin(clock * 6 + g.x) * 0.25 : 0;
+  const cx = (x + 0.5) * TS, cy = (y + 0.5 + bob) * TS, r = TS * 0.72;
+  const top = cy - r * 0.15, bot = cy + r * 0.9;
+  const flashing = g.fright && frightT < 2 && Math.floor(clock * 6) % 2 === 0;
+
+  if (g.state !== "eaten") {
+    ctx.fillStyle = g.fright ? (flashing ? "#f4f4ff" : "#2233ff") : g.color;
+    ctx.beginPath();
+    ctx.arc(cx, top, r, Math.PI, 0);
+    ctx.lineTo(cx + r, bot);
+    const n = 4, w = (2 * r) / n, phase = Math.floor(clock * 8) % 2 ? r * 0.18 : 0;
+    for (let i = 0; i < n; i++) {
+      const x1 = cx + r - i * w;
+      ctx.lineTo(x1 - w / 2, bot - r * 0.28 + (i % 2 ? phase : -phase) * 0.5);
+      ctx.lineTo(x1 - w, bot);
+    }
+    ctx.closePath(); ctx.fill();
+  }
+
+  if (g.fright && g.state !== "eaten") {
+    ctx.fillStyle = flashing ? "#ff3355" : "#ffd0b0";
+    ctx.fillRect(cx - r * 0.38, top - r * 0.1, r * 0.2, r * 0.2);
+    ctx.fillRect(cx + r * 0.18, top - r * 0.1, r * 0.2, r * 0.2);
+    ctx.strokeStyle = ctx.fillStyle; ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (let i = 0; i <= 6; i++) ctx.lineTo(cx - r * 0.55 + i * r * 0.183, top + r * 0.45 + (i % 2 ? -r * 0.12 : 0));
+    ctx.stroke();
+    return;
+  }
+
+  const [dx, dy] = g.dir ? DV[g.dir] : [0, 0];
+  for (const s of [-1, 1]) {
+    const ex = cx + s * r * 0.36, ey = top - r * 0.05;
+    ctx.fillStyle = "#ffffff";
+    ctx.beginPath(); ctx.ellipse(ex + dx * r * 0.08, ey + dy * r * 0.08, r * 0.24, r * 0.3, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#1a2bd8";
+    ctx.beginPath(); ctx.arc(ex + dx * r * 0.18, ey + dy * r * 0.2, r * 0.13, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+function centerText(text, y, color, size) {
+  ctx.font = `${size || 14}px "Press Start 2P", "Courier New", monospace`;
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillStyle = color;
+  ctx.fillText(text, W / 2, y);
+}
+
+function draw() {
+  ctx.fillStyle = COL.screen;
+  ctx.fillRect(0, 0, W, H);
+  const flash = state === "clear" && Math.floor(stateT * 5) % 2 === 1;
+  ctx.drawImage(flash ? flashLayer : mazeLayer, 0, 0, W, H);
+  drawDots();
+
+  if (state !== "clear" && state !== "over") {
+    if (state !== "dying" || stateT < 0.5) ghosts.forEach(drawGhost);
+  }
+  if (state !== "over") drawPac();
+
+  ctx.font = `10px "Press Start 2P", monospace`;
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  popups.forEach(p => { ctx.fillStyle = "#29e6ff"; ctx.fillText(p.text, (p.x + 0.5) * TS, (p.y + 0.5) * TS); });
+
+  const msgY = 17.5 * TS;
+  if (state === "title") {
+    centerText("PRESS ARROW KEY", msgY, COL.pac, 14);
+  } else if (state === "ready") {
+    centerText("READY!", msgY, COL.pac, 16);
+  } else if (state === "paused") {
+    centerText("PAUSED", msgY, COL.pac, 16);
+  } else if (state === "over") {
+    centerText("GAME  OVER", msgY, "#ff2b2b", 16);
+    if (Math.floor(clock * 2) % 2 === 0) centerText("PRESS ARROW KEY", 23.5 * TS, COL.dot, 11);
+  }
+}
+
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min((now - last) / 1000, 0.05);
+  last = now;
+  update(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+
+// ---------- 입력 ----------
+function press(d) {
+  if (state === "title" || state === "over") { newGame(); }
+  queued = d;
+}
+const KEYS = { ArrowLeft: "left", ArrowRight: "right", ArrowUp: "up", ArrowDown: "down", a: "left", d: "right", w: "up", s: "down" };
+document.addEventListener("keydown", e => {
+  if (KEYS[e.key]) { e.preventDefault(); press(KEYS[e.key]); }
+  if (e.key === "p" || e.key === "P" || e.key === "Escape") {
+    if (state === "playing") setState("paused");
+    else if (state === "paused") state = "playing";
+  }
+});
+document.querySelectorAll(".pad button").forEach(b =>
+  b.addEventListener("pointerdown", e => { e.preventDefault(); press(b.dataset.d); }));
+
+let touchStart = null;
+canvas.addEventListener("pointerdown", e => { touchStart = [e.clientX, e.clientY]; });
+canvas.addEventListener("pointerup", e => {
+  if (!touchStart) return;
+  const dx = e.clientX - touchStart[0], dy = e.clientY - touchStart[1];
+  touchStart = null;
+  if (Math.max(Math.abs(dx), Math.abs(dy)) < 20) return;
+  press(Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? "right" : "left") : (dy > 0 ? "down" : "up"));
+});
+
+// ---------- 시작 ----------
+resetMap(); resetActors();
+buildMazeLayer();
+flashLayer.width = W * dpr; flashLayer.height = H * dpr;
+(() => {
+  const keep = mazeLayer.getContext("2d").getImageData(0, 0, mazeLayer.width, mazeLayer.height);
+  buildMazeLayer("#ffffff");
+  flashLayer.getContext("2d").drawImage(mazeLayer, 0, 0);
+  mazeLayer.getContext("2d").putImageData(keep, 0, 0);
+})();
+updateHud();
+document.fonts && document.fonts.ready.then(() => draw());
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
